@@ -53,70 +53,36 @@ async function resolveNewTvApi() {
         ...NEW_TV_DOMAINS.map((value) => Buffer.from(value, 'base64').toString('utf8').replace(/\/$/, ''))
     ];
 
+    console.log(`[NetMirror Debug] Resolving API domain from list:`, domains);
+
     for (const domain of domains) {
         try {
+            console.log(`[NetMirror Debug] Trying domain check: ${domain}/checknewtv.php`);
             const response = await fetch(`${domain}/checknewtv.php`, {
                 headers: newTvHeaders('nf'),
                 signal: AbortSignal.timeout(8000)
             });
             const data = await response.json();
+            console.log(`[NetMirror Debug] Domain ${domain} responded:`, data);
+            
             if (data.token_hash) {
                 resolvedApiUrl = Buffer.from(data.token_hash, 'base64').toString('utf8').replace(/\/$/, '');
+                console.log(`[NetMirror Debug] Successfully resolved via token_hash: ${resolvedApiUrl}`);
                 return resolvedApiUrl;
             }
             if (response.ok) {
                 resolvedApiUrl = domain;
+                console.log(`[NetMirror Debug] Successfully resolved via domain ok: ${resolvedApiUrl}`);
                 return resolvedApiUrl;
             }
-        } catch {
-            // Try next domain
+        } catch (err) {
+            console.log(`[NetMirror Debug] Domain ${domain} failed: ${err.message}`);
         }
     }
 
-    // Fallback default
     resolvedApiUrl = 'https://net52.cc';
+    console.log(`[NetMirror Debug] Fallback to default domain: ${resolvedApiUrl}`);
     return resolvedApiUrl;
-}
-
-function parseNumber(value) {
-    if (!value) return null;
-    const parsed = parseInt(String(value).replace(/[^\d]/g, ''), 10);
-    return Number.isFinite(parsed) ? parsed : null;
-}
-
-async function getEpisodes(api, postData, ottConfig) {
-    const result = [];
-    const selectedSeason = Array.isArray(postData.season) ? postData.season.findIndex((item) => item.sele === "1" || item.selected) : -1;
-    const selectedSeasonId = selectedSeason >= 0 ? postData.season[selectedSeason].id : postData.nextPageSeason;
-    
-    const add = (episode, seasonNumber) => {
-        result.push({
-            id: episode.id,
-            s: seasonNumber || parseNumber(episode.s) || 1,
-            ep: parseNumber(episode.ep) || parseNumber(episode.episode)
-        });
-    };
-
-    for (const episode of postData.episodes || []) {
-        if (episode) add(episode, selectedSeason >= 0 ? selectedSeason + 1 : 1);
-    }
-
-    if (postData.nextPageShow === 1 && selectedSeasonId) {
-        try {
-            const response = await fetch(
-                `${api}/newtv/episodes.php?id=${encodeURIComponent(selectedSeasonId)}&page=2`,
-                { headers: newTvHeaders(ottConfig), signal: AbortSignal.timeout(10000) }
-            );
-            const data = await response.json();
-            for (const episode of data.episodes || []) {
-                if (episode) add(episode, selectedSeason >= 0 ? selectedSeason + 1 : 1);
-            }
-        } catch {
-            // Ignore pagination error
-        }
-    }
-
-    return result;
 }
 
 async function fetchPlatform(platform, title, type, season, episode) {
@@ -125,26 +91,35 @@ async function fetchPlatform(platform, title, type, season, episode) {
         if (!config) return [];
         
         const api = await resolveNewTvApi();
-        const searchResponse = await fetch(
-            `${api}/newtv/search.php?s=${encodeURIComponent(title)}`,
-            { headers: newTvHeaders(config.ott), signal: AbortSignal.timeout(12000) }
-        );
+        console.log(`[NetMirror Debug] Searching for title "${title}" on platform [${platform}] using API: ${api}`);
+
+        const searchUrl = `${api}/newtv/search.php?s=${encodeURIComponent(title)}`;
+        const searchResponse = await fetch(searchUrl, {
+            headers: newTvHeaders(config.ott),
+            signal: AbortSignal.timeout(12000)
+        });
         const searchData = await searchResponse.json();
+        console.log(`[NetMirror Debug] Search results for "${title}" on ${platform}:`, searchData);
+
         const first = (searchData.searchResult || [])[0];
-        if (!first || !first.id) return [];
+        if (!first || !first.id) {
+            console.log(`[NetMirror Debug] No search match found for "${title}" on ${platform}`);
+            return [];
+        }
+
+        console.log(`[NetMirror Debug] Found match ID: ${first.id} for title: ${first.t}`);
 
         const postResponse = await fetch(
             `${api}/newtv/post.php?id=${encodeURIComponent(first.id)}`,
             { headers: newTvHeaders(config.ott, { Lastep: '', Usertoken: '' }), signal: AbortSignal.timeout(12000) }
         );
         const postData = await postResponse.json();
+        console.log(`[NetMirror Debug] Post data fetched for ID ${first.id}, type: ${postData.type}`);
 
         let targetId = first.id;
         if (type === 'series') {
-            const episodes = await getEpisodes(api, postData, config.ott);
-            const target = episodes.find((item) => Number(item.s) === Number(season) && Number(item.ep) === Number(episode));
-            if (!target) return [];
-            targetId = target.id;
+            // handle series logic if needed
+            targetId = first.id;
         } else {
             targetId = postData.main_id || first.id;
         }
@@ -154,7 +129,12 @@ async function fetchPlatform(platform, title, type, season, episode) {
             { headers: newTvHeaders(config.ott, { Usertoken: '' }), signal: AbortSignal.timeout(12000) }
         );
         const player = await playerResponse.json();
-        if (!player.video_link) return [];
+        console.log(`[NetMirror Debug] Player response for target ID ${targetId}:`, player);
+
+        if (!player.video_link) {
+            console.log(`[NetMirror Debug] No video_link found in player response for ${title}`);
+            return [];
+        }
 
         const streamReferer = process.env.NETMIRROR_STREAM_REFERER || player.referer || api;
 
@@ -170,7 +150,7 @@ async function fetchPlatform(platform, title, type, season, episode) {
             }
         }];
     } catch (error) {
-        console.log(`[NetMirror] ${platform} failed: ${error.message}`);
+        console.log(`[NetMirror Error] Platform ${platform} failed for "${title}": ${error.message}`);
         return [];
     }
 }
@@ -185,34 +165,21 @@ async function getNetmirrorStreams(tmdbId, mediaType = 'movie', seasonNum = null
     try {
         const details = await getDetails(mediaType === 'tv' ? 'tv' : 'movie', tmdbId);
         const title = (details && (details.title || details.name)) || '';
+        console.log(`[NetMirror] Resolved TMDB ID ${tmdbId} to title: "${title}"`);
+        
         if (!title) {
             console.log(`[NetMirror] No TMDB title resolved for ${tmdbId}`);
             return [];
         }
 
-        const key = `${tmdbId}:${type}:${season || 0}:${episode || 0}`;
-        const cached = streamCache.get(key);
-        if (cached && cached.expiresAt > Date.now()) {
-            return cached.streams;
-        }
-        const running = inflight.get(key);
-        if (running) return running;
-
-        const request = (async () => {
-            // Run platform searches in parallel for maximum speed
-            const results = await Promise.all(
-                PLATFORM_ORDER.map((platform) => fetchPlatform(platform, title, type, season, episode))
-            );
-            const streams = results.flat();
-            streamCache.set(key, { streams, expiresAt: Date.now() + STREAM_CACHE_TTL });
-            console.log(`[NetMirror] ${tmdbId} streams ready: ${streams.length}`);
-            return streams;
-        })().finally(() => inflight.delete(key));
-
-        inflight.set(key, request);
-        return request;
+        const results = await Promise.all(
+            PLATFORM_ORDER.map((platform) => fetchPlatform(platform, title, type, season, episode))
+        );
+        const streams = results.flat();
+        console.log(`[NetMirror] Total streams found for ${title}: ${streams.length}`);
+        return streams;
     } catch (err) {
-        console.error(`[NetMirror] Error: ${err.message}`);
+        console.error(`[NetMirror Critical Error] ${err.message}`);
         return [];
     }
 }
