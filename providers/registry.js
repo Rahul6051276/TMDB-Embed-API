@@ -20,6 +20,7 @@ const providerFunctionMap = {
   'netmirror.js': 'getNetmirrorStreams',
   'onetouchtv.js': 'getOnetouchtvStreams',
   'zxcstreams.js': 'getZxcstreamsStreams',
+  'vegamovies.js': 'getVideoSources',
 };
 
 // Stats for debug endpoint
@@ -96,6 +97,10 @@ function createFetchFunction(providerInfo) {
           lastCookieStats.remainingMB = global.currentRequestUserCookieRemainingMB;
         }
         global.currentRequestConfig = previousConfig || {};
+      } else if (providerInfo.name === 'vegamovies') {
+        // VegaMovies handles standard getDetail/search internally via Zangetsu adapter pattern if registered
+        // Here we pass standard parameters as expected by the provider adapter helper or fallback
+        result = await module[funcName](ctx.tmdbId, mediaType, ctx.season || null, ctx.episode || null);
       } else {
         // Standard provider call
         result = await module[funcName](ctx.tmdbId, mediaType, ctx.season || null, ctx.episode || null);
