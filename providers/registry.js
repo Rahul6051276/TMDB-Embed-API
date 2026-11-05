@@ -62,7 +62,7 @@ function createFetchFunction(providerInfo) {
     if (!module) return [];
 
     const funcName = providerInfo.functionName;
-    if (!module[funcName]) {
+    if (!module[funcName] && providerInfo.name !== 'vegamovies') {
       console.error(`Provider ${providerInfo.name} does not export ${funcName}`);
       return [];
     }
@@ -71,7 +71,7 @@ function createFetchFunction(providerInfo) {
       const mediaType = ctx.type === 'movie' ? 'movie' : 'tv';
       const t0 = Date.now();
 
-      let result;
+      let result = [];
       if (providerInfo.name === 'showbox') {
         // Special case for Showbox with TMDB key and cookies
         const { getTmdbApiKey } = require('../utils/tmdbKey');
@@ -98,9 +98,41 @@ function createFetchFunction(providerInfo) {
         }
         global.currentRequestConfig = previousConfig || {};
       } else if (providerInfo.name === 'vegamovies') {
-        // VegaMovies handles standard getDetail/search internally via Zangetsu adapter pattern if registered
-        // Here we pass standard parameters as expected by the provider adapter helper or fallback
-        result = await module[funcName](ctx.tmdbId, mediaType, ctx.season || null, ctx.episode || null);
+        // VegaMovies bridge: fetch title from TMDB ID, search on VegaMovies, get detail, and resolve video sources
+        try {
+          const { getTmdbApiKey } = require('../utils/tmdbKey');
+          const tmdbApiKey = getTmdbApiKey();
+          const typeStr = mediaType === 'movie' ? 'movie' : 'tv';
+          const tmdbRes = await fetch(`https://api.themoviedb.org/3/${typeStr}/${ctx.tmdbId}?api_key=${tmdbApiKey}`);
+          const tmdbData = await tmdbRes.json();
+          const title = tmdbData.title || tmdbData.name || tmdbData.original_title;
+
+          if (title) {
+            console.log(`[registry] VegaMovies searching for title: "${title}"`);
+            const searchResults = await module.search(title, 1, {});
+            if (searchResults && searchResults.length > 0) {
+              const detail = await module.getDetail(searchResults[0].url, {});
+              let targetEpisodeUrl = null;
+
+              if (mediaType === 'tv' && ctx.season && ctx.episode) {
+                const eps = detail.episodes || [];
+                const epMatch = eps.find(e => e.id === `S${ctx.season}E${ctx.episode}` || e.number === ctx.episode);
+                if (epMatch) targetEpisodeUrl = epMatch.url;
+              } else {
+                if (detail.episodes && detail.episodes.length > 0) {
+                  targetEpisodeUrl = detail.episodes[0].url;
+                }
+              }
+
+              if (targetEpisodeUrl) {
+                result = await module.getVideoSources(targetEpisodeUrl);
+              }
+            }
+          }
+        } catch (vegasErr) {
+          console.error('[registry] VegaMovies fetch error:', vegasErr.message);
+          result = [];
+        }
       } else {
         // Standard provider call
         result = await module[funcName](ctx.tmdbId, mediaType, ctx.season || null, ctx.episode || null);
