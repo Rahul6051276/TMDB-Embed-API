@@ -77,7 +77,7 @@ async function getStreams(tmdbId, type, season, episode) {
 
             return {
                 server: 'MovieBox - ' + quality,
-                title: `${titleBase} [${quality} - ${lang}]`,
+                title: `${titleBase || 'MovieBox'} [${quality} - ${lang}]`,
                 url: streamUrl,
                 isHindi: isHindi
             };
