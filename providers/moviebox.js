@@ -101,4 +101,6 @@ async function getStreams(tmdbId, type, season, episode) {
     }
 }
 
-module.exports = { getStreams };
+// Ensure both direct function and object mapping are exported correctly to prevent 'does not export undefined' error
+module.exports = getStreams;
+module.exports.getStreams = getStreams;
