@@ -98,24 +98,33 @@ function createFetchFunction(providerInfo) {
         }
         global.currentRequestConfig = previousConfig || {};
       } else if (providerInfo.name === 'vegamovies') {
-        // VegaMovies bridge: fetch title from TMDB ID, search on VegaMovies, get detail, and resolve video sources
+        // VegaMovies bridge with detailed debug logs
         try {
           const { getTmdbApiKey } = require('../utils/tmdbKey');
           const tmdbApiKey = getTmdbApiKey();
           const typeStr = mediaType === 'movie' ? 'movie' : 'tv';
+          
+          console.log(`[registry] VegaMovies fetching TMDB metadata for ID: ${ctx.tmdbId}`);
           const tmdbRes = await fetch(`https://api.themoviedb.org/3/${typeStr}/${ctx.tmdbId}?api_key=${tmdbApiKey}`);
           const tmdbData = await tmdbRes.json();
           const title = tmdbData.title || tmdbData.name || tmdbData.original_title;
 
-          if (title) {
+          if (!title) {
+            console.log(`[registry] VegaMovies warning: No title found from TMDB for ID ${ctx.tmdbId}`);
+            result = [];
+          } else {
             console.log(`[registry] VegaMovies searching for title: "${title}"`);
             const searchResults = await module.search(title, 1, {});
+            console.log(`[registry] VegaMovies search results count: ${searchResults ? searchResults.length : 0}`);
+            
             if (searchResults && searchResults.length > 0) {
+              console.log(`[registry] VegaMovies picking first result URL: ${searchResults[0].url}`);
               const detail = await module.getDetail(searchResults[0].url, {});
               let targetEpisodeUrl = null;
 
               if (mediaType === 'tv' && ctx.season && ctx.episode) {
                 const eps = detail.episodes || [];
+                console.log(`[registry] VegaMovies looking for S${ctx.season}E${ctx.episode} among ${eps.length} episodes`);
                 const epMatch = eps.find(e => e.id === `S${ctx.season}E${ctx.episode}` || e.number === ctx.episode);
                 if (epMatch) targetEpisodeUrl = epMatch.url;
               } else {
@@ -125,12 +134,18 @@ function createFetchFunction(providerInfo) {
               }
 
               if (targetEpisodeUrl) {
+                console.log(`[registry] VegaMovies resolving video sources from episode URL...`);
                 result = await module.getVideoSources(targetEpisodeUrl);
+                console.log(`[registry] VegaMovies successfully resolved ${result ? result.length : 0} streams`);
+              } else {
+                console.log(`[registry] VegaMovies warning: No matching episode/movie stream URL found`);
               }
+            } else {
+              console.log(`[registry] VegaMovies warning: No search results found on site for "${title}"`);
             }
           }
         } catch (vegasErr) {
-          console.error('[registry] VegaMovies fetch error:', vegasErr.message);
+          console.error('[registry] VegaMovies bridge critical error:', vegasErr.message);
           result = [];
         }
       } else {
