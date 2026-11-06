@@ -1,3 +1,4 @@
+// providers/registry.js
 const { config } = require('../utils/config');
 const fs = require('fs');
 const path = require('path');
@@ -21,6 +22,7 @@ const providerFunctionMap = {
   'onetouchtv.js': 'getOnetouchtvStreams',
   'zxcstreams.js': 'getZxcstreamsStreams',
   'vegamovies.js': 'getVideoSources',
+  'desiflix.js': 'getDesiflixStreams',
 };
 
 // Stats for debug endpoint
