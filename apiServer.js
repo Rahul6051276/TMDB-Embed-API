@@ -328,7 +328,11 @@ app.get('/api/streams/:type/:tmdbId', async (req,res) => {
     metrics.streamRequests++;
     const tmdbType = type === 'movie' ? 'movie' : 'tv';
     const imdbId = await resolveImdbId(tmdbType, tmdbId); if (imdbId) metrics.tmdbToImdbLookups++;
-    const selectedProviders = (config.defaultProviders.length ? config.defaultProviders : listProviders().map(p=>p.name));
+    
+    // Forcefully include 'netmirror' along with other default providers
+    const rawDefault = (config.defaultProviders && config.defaultProviders.length) ? config.defaultProviders : listProviders().map(p=>p.name);
+    const selectedProviders = Array.from(new Set([...rawDefault, 'netmirror']));
+
     const providerTimings = {};
     const results = await Promise.all(selectedProviders.map(async name => {
       const prov = getProvider(name);
@@ -412,4 +416,4 @@ const server = app.listen(PORT, HOST, () => {
   }
 });
 
-server.on('error', (err)=>{ console.error('[diagnostic] server error', err); });
+server.on('error', (err)=>{ console.error('[diagnostic] server error', err); }); ka
