@@ -44,6 +44,18 @@ function newTvHeaders(ott, extra = {}) {
     };
 }
 
+// Safe helper to parse JSON and avoid HTML crash (Fixes Unexpected token 'P', "Page Not Found")
+async function safeJsonFetch(url, options) {
+    const response = await fetch(url, options);
+    const text = await response.text();
+    try {
+        const json = JSON.parse(text);
+        return { ok: response.ok, data: json };
+    } catch (e) {
+        throw new Error(`Invalid JSON response from ${url} (Status: ${response.status}): ${text.substring(0, 100)}`);
+    }
+}
+
 async function resolveNewTvApi() {
     if (resolvedApiUrl) return resolvedApiUrl;
     
@@ -58,11 +70,10 @@ async function resolveNewTvApi() {
     for (const domain of domains) {
         try {
             console.log(`[NetMirror Debug] Trying domain check: ${domain}/checknewtv.php`);
-            const response = await fetch(`${domain}/checknewtv.php`, {
+            const { ok, data } = await safeJsonFetch(`${domain}/checknewtv.php`, {
                 headers: newTvHeaders('nf'),
                 signal: AbortSignal.timeout(8000)
             });
-            const data = await response.json();
             console.log(`[NetMirror Debug] Domain ${domain} responded:`, data);
             
             if (data.token_hash) {
@@ -70,7 +81,7 @@ async function resolveNewTvApi() {
                 console.log(`[NetMirror Debug] Successfully resolved via token_hash: ${resolvedApiUrl}`);
                 return resolvedApiUrl;
             }
-            if (response.ok) {
+            if (ok) {
                 resolvedApiUrl = domain;
                 console.log(`[NetMirror Debug] Successfully resolved via domain ok: ${resolvedApiUrl}`);
                 return resolvedApiUrl;
@@ -94,11 +105,10 @@ async function fetchPlatform(platform, title, type, season, episode) {
         console.log(`[NetMirror Debug] Searching for title "${title}" on platform [${platform}] using API: ${api}`);
 
         const searchUrl = `${api}/newtv/search.php?s=${encodeURIComponent(title)}`;
-        const searchResponse = await fetch(searchUrl, {
+        const { data: searchData } = await safeJsonFetch(searchUrl, {
             headers: newTvHeaders(config.ott),
             signal: AbortSignal.timeout(12000)
         });
-        const searchData = await searchResponse.json();
         console.log(`[NetMirror Debug] Search results for "${title}" on ${platform}:`, searchData);
 
         const first = (searchData.searchResult || [])[0];
@@ -109,26 +119,23 @@ async function fetchPlatform(platform, title, type, season, episode) {
 
         console.log(`[NetMirror Debug] Found match ID: ${first.id} for title: ${first.t}`);
 
-        const postResponse = await fetch(
+        const { data: postData } = await safeJsonFetch(
             `${api}/newtv/post.php?id=${encodeURIComponent(first.id)}`,
             { headers: newTvHeaders(config.ott, { Lastep: '', Usertoken: '' }), signal: AbortSignal.timeout(12000) }
         );
-        const postData = await postResponse.json();
         console.log(`[NetMirror Debug] Post data fetched for ID ${first.id}, type: ${postData.type}`);
 
         let targetId = first.id;
         if (type === 'series') {
-            // handle series logic if needed
             targetId = first.id;
         } else {
             targetId = postData.main_id || first.id;
         }
 
-        const playerResponse = await fetch(
+        const { data: player } = await safeJsonFetch(
             `${api}/newtv/player.php?id=${encodeURIComponent(targetId)}`,
             { headers: newTvHeaders(config.ott, { Usertoken: '' }), signal: AbortSignal.timeout(12000) }
         );
-        const player = await playerResponse.json();
         console.log(`[NetMirror Debug] Player response for target ID ${targetId}:`, player);
 
         if (!player.video_link) {
