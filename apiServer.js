@@ -416,4 +416,4 @@ const server = app.listen(PORT, HOST, () => {
   }
 });
 
-server.on('error', (err)=>{ console.error('[diagnostic] server error', err); }); ka
+server.on('error', (err)=>{ console.error('[diagnostic] server error', err); });
