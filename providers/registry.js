@@ -6,7 +6,7 @@ const path = require('path');
 // Lazy load cache for providers
 const providerCache = new Map();
 
-// Function name mappings for existing providers
+// Function name mappings for all providers (lowercase keys for safety)
 const providerFunctionMap = {
   'showbox.js': 'getStreamsFromTmdbId',
   '4khdhub.js': 'get4KHDHubStreams',
@@ -23,8 +23,25 @@ const providerFunctionMap = {
   'zxcstreams.js': 'getZxcstreamsStreams',
   'vegamovies.js': 'getVideoSources',
   'desiflix.js': 'getDesiflixStreams',
-  'hdhub4u.js': 'fetch', // 🔥 Added HDHub4u mapping
+  'hdhub4u.js': 'fetch',
+  'moviebox.js': 'getMovieboxStreams'
 };
+
+// Get all provider files with smart fallback
+function getProviderFiles() {
+  const providersDir = path.join(__dirname);
+  return fs.readdirSync(providersDir)
+    .filter(file => file.endsWith('.js') && file !== 'registry.js')
+    .map(file => {
+      const lowerFile = file.toLowerCase();
+      return {
+        name: path.parse(file).name.toLowerCase(),
+        file: file,
+        // Fallback to 'fetch' if function mapping is missing
+        functionName: providerFunctionMap[lowerFile] || 'fetch'
+      };
+    });
+}
 
 // Stats for debug endpoint
 let lastCookieStats = { selected: null, index: null, total: 0, remainingMB: null, timestamp: null };
