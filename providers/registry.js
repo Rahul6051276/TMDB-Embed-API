@@ -8,7 +8,7 @@ const providerCache = new Map();
 
 // Function name mappings for existing providers
 const providerFunctionMap = {
-  'Showbox.js': 'getStreamsFromTmdbId',
+  'showbox.js': 'getStreamsFromTmdbId',
   '4khdhub.js': 'get4KHDHubStreams',
   'vixsrc.js': 'getVixsrcStreams',
   'videasy.js': 'getVideasyStreams',
@@ -23,6 +23,7 @@ const providerFunctionMap = {
   'zxcstreams.js': 'getZxcstreamsStreams',
   'vegamovies.js': 'getVideoSources',
   'desiflix.js': 'getDesiflixStreams',
+  'hdhub4u.js': 'fetch', // 🔥 Added HDHub4u mapping
 };
 
 // Stats for debug endpoint
@@ -99,6 +100,14 @@ function createFetchFunction(providerInfo) {
           lastCookieStats.remainingMB = global.currentRequestUserCookieRemainingMB;
         }
         global.currentRequestConfig = previousConfig || {};
+      } else if (providerInfo.name === 'hdhub4u') {
+        // 🔥 HDHub4u bridge execution context
+        result = await module[funcName]({
+          tmdbId: ctx.tmdbId,
+          type: ctx.type,
+          season: ctx.season,
+          episode: ctx.episode
+        });
       } else if (providerInfo.name === 'vegamovies') {
         // VegaMovies bridge with detailed debug logs
         try {
