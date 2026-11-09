@@ -16,8 +16,19 @@ async function fetchJson(url, timeoutMs = 10000) {
         const timer = setTimeout(() => controller.abort(), timeoutMs);
         const res = await fetch(url, { headers: HEADERS, signal: controller.signal });
         clearTimeout(timer);
+        
         if (!res.ok) return null;
-        return await res.json();
+
+        // 🔥 Safe check: Ensure response is JSON and not an HTML/Cloudflare block page
+        const contentType = res.headers.get('content-type') || '';
+        const text = await res.text();
+        
+        if (!contentType.includes('application/json') && text.trim().startsWith('<')) {
+            console.warn(`[HDGharTV] Blocked or HTML response received from ${url}`);
+            return null;
+        }
+
+        return JSON.parse(text);
     } catch (err) {
         console.warn(`[HDGharTV] fetch failed for ${url}: ${err.message}`);
         return null;
