@@ -70,20 +70,6 @@ function rot13(value) {
     });
 }
 
-function cleanTitle(title) {
-    let name = title.replace(/\.[a-zA-Z0-9]{2,4}$/, "");
-    const normalized = name.replace(/WEB[-_. ]?DL/gi, "WEB-DL").replace(/WEB[-_. ]?RIP/gi, "WEBRIP").replace(/H[ .]?265/gi, "H265").replace(/H[ .]?264/gi, "H264");
-    const parts = normalized.split(/[\s_.]/);
-    const sourceTags = new Set(["WEB-DL", "WEBRIP", "BLURAY", "HDRIP", "DVDRIP", "HDTV"]);
-    const codecTags = new Set(["H264", "H265", "X264", "X265", "HEVC"]);
-    const filtered = parts.map((part) => {
-        const p = part.toUpperCase();
-        if (sourceTags.has(p) || codecTags.has(p)) return p;
-        return null;
-    }).filter(Boolean);
-    return [...new Set(filtered)].join(" ");
-}
-
 async function getRedirectLinks(url) {
     try {
         const response = await fetch(url, { headers: HEADERS });
@@ -209,9 +195,10 @@ async function searchAndExtract(title, year) {
     }
 }
 
-async function fetch({ tmdbId, type, season, episode }) {
-    console.log(`[HDHub4u] Fetching streams for TMDB ID: ${tmdbId}, Type: ${type}`);
+async function getHdhub4uStreams(tmdbId, mediaType = 'movie', seasonNum = null, episodeNum = null) {
+    console.log(`[HDHub4u] Fetching streams for TMDB ID: ${tmdbId}, Type: ${mediaType}`);
     try {
+        const type = mediaType === 'tv' ? 'series' : 'movie';
         const tmdbType = type === 'series' ? 'tv' : 'movie';
         const details = await getDetails(tmdbType, tmdbId);
         const title = (details && (details.title || details.name)) || '';
@@ -224,8 +211,8 @@ async function fetch({ tmdbId, type, season, episode }) {
         }
 
         let searchTitle = title;
-        if (type === 'series' && season) {
-            searchTitle = `${title} S${season.toString().padStart(2, '0')}`;
+        if (type === 'series' && seasonNum) {
+            searchTitle = `${title} S${seasonNum.toString().padStart(2, '0')}`;
         }
 
         const streams = await searchAndExtract(searchTitle, year);
@@ -237,7 +224,4 @@ async function fetch({ tmdbId, type, season, episode }) {
     }
 }
 
-const name = 'hdhub4u';
-const enabled = true;
-
-module.exports = { name, enabled, fetch };
+module.exports = { getHdhub4uStreams };
