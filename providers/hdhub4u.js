@@ -1,4 +1,4 @@
-const cheerio = require('cheerio-without-node-native');
+const cheerio = require('cheerio');
 const CryptoJS = require('crypto-js');
 const { getDetails, resolveImdbId } = require('../utils/tmdb');
 
@@ -155,8 +155,17 @@ async function searchAndExtract(title, year) {
     try {
         const domain = await getCurrentDomain();
         const searchUrl = `${domain}/?s=${encodeURIComponent(title)}`;
+        console.log(`[HDHub4u Debug] Fetching search URL: ${searchUrl}`);
+        
         const res = await fetch(searchUrl, { headers: HEADERS });
-        if (!res.ok) return [];
+        console.log(`[HDHub4u Debug] Search response status: ${res.status} ${res.statusText}`);
+        
+        if (!res.ok) {
+            const errText = await res.text();
+            console.log(`[HDHub4u Debug] Blocked or error body snippet:`, errText.slice(0, 200));
+            return [];
+        }
+        
         const html = await res.text();
         const $ = cheerio.load(html);
         
@@ -167,6 +176,8 @@ async function searchAndExtract(title, year) {
             const postTitle = $(el).find("h2, h3, .title").text().trim() || aTag.text().trim();
             if (postUrl) posts.push({ url: postUrl, title: postTitle });
         });
+
+        console.log(`[HDHub4u Debug] Found ${posts.length} posts for title: "${title}"`);
 
         const streams = [];
         for (const post of posts.slice(0, 2)) {
@@ -190,7 +201,7 @@ async function searchAndExtract(title, year) {
         }
         return streams;
     } catch (e) {
-        console.warn(`[HDHub4u] Search error: ${e.message}`);
+        console.error(`[HDHub4u] Search exception error: ${e.message}`);
         return [];
     }
 }
