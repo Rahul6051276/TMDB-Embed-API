@@ -1,227 +1,274 @@
-const cheerio = require('cheerio');
-const CryptoJS = require('crypto-js');
-const { getDetails, resolveImdbId } = require('../utils/tmdb');
+Require('dotenv').config();
+const express = require('express');
+const cors = require('cors');
+const os = require('os');
+const { config, saveConfigPatch, OVERRIDE_PATH } = require('./utils/config');
+const { authenticate, issueSession, requireAuth, getSession, updatePassword } = require('./utils/auth');
+const path = require('path');
+const { listProviders, getProvider, getCookieStats } = require('./providers/registry');
+const { createProxyRoutes, processStreamsForProxy } = require('./proxy/proxyServer');
+const { resolveImdbId } = require('./utils/tmdb'); // <-- Fixed path here
+const { applyFilters } = require('./utils/streamFilters');
 
-let MAIN_URL = "https://new3.hdhub4u.fo";
-const DOMAINS_URL = "https://raw.githubusercontent.com/phisher98/TVVVV/refs/heads/main/domains.json";
-const DOMAIN_CACHE_TTL = 4 * 60 * 60 * 1000;
-let domainCacheTimestamp = 0;
+const app = express();
+app.set('trust proxy', 1);
 
-const HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Edg/131.0.0.0",
-    "Cookie": "xla=s4t",
-    "Referer": `${MAIN_URL}/`
+if (config.enableProxy) {
+  console.log('[startup] enableProxy flag active: mounting proxy routes');
+  createProxyRoutes(app);
+} else {
+  console.log('[startup] enableProxy flag disabled: proxy routes not mounted');
+}
+
+const loginAttempts = new Map();
+const MAX_ATTEMPTS_WINDOW = 5;
+const WINDOW_MS = 10 * 60 * 1000;
+const BASE_LOCK_MS = 5 * 60 * 1000;
+
+function getClientIp(req){
+  return (req.headers['x-forwarded-for'] || req.connection.remoteAddress || '').split(',')[0].trim();
+}
+
+function recordLoginFailure(ip){
+  const now = Date.now();
+  let entry = loginAttempts.get(ip);
+  if (!entry) {
+    entry = { count:1, first: now, last: now, lockedUntil:0 };
+    loginAttempts.set(ip, entry);
+    return entry;
+  }
+  if (now - entry.first > WINDOW_MS && now > entry.lockedUntil) {
+    entry.count = 1;
+    entry.first = now;
+  } else {
+    entry.count++;
+  }
+  entry.last = now;
+  if (entry.count > MAX_ATTEMPTS_WINDOW) {
+    const over = entry.count - MAX_ATTEMPTS_WINDOW;
+    const lockMs = BASE_LOCK_MS * Math.min(8, Math.pow(2, over-1));
+    entry.lockedUntil = now + lockMs;
+  }
+  return entry;
+}
+
+function canAttempt(ip){
+  const entry = loginAttempts.get(ip);
+  if (!entry) return { allowed:true };
+  const now = Date.now();
+  if (entry.lockedUntil && now < entry.lockedUntil) {
+    return { allowed:false, retryAfter: Math.ceil((entry.lockedUntil - now)/1000) };
+  }
+  if (now - entry.first > WINDOW_MS) {
+    loginAttempts.delete(ip);
+    return { allowed:true };
+  }
+  return { allowed:true };
+}
+
+function recordLoginSuccess(ip){
+  loginAttempts.delete(ip);
+}
+
+const realProcessExit = process.exit.bind(process);
+let allowControlledExit = false;
+process.exit = function(code){
+  if (allowControlledExit) return realProcessExit(code);
+  console.warn('[diagnostic] Intercepted process.exit with code', code, new Error('exit trace').stack);
 };
 
-function updateMainUrl(url) {
-    MAIN_URL = url;
-    HEADERS.Referer = `${url}/`;
-}
+app.use(cors());
+app.use(express.json());
 
-async function fetchAndUpdateDomain() {
-    const now = Date.now();
-    if (now - domainCacheTimestamp < DOMAIN_CACHE_TTL) return;
-    try {
-        const response = await fetch(DOMAINS_URL, {
-            method: "GET",
-            headers: { "User-Agent": "Mozilla/5.0" }
-        });
-        if (response.ok) {
-            const data = await response.json();
-            if (data && data.HDHUB4u) {
-                const newDomain = data.HDHUB4u;
-                if (newDomain !== MAIN_URL) {
-                    updateMainUrl(newDomain);
-                    domainCacheTimestamp = now;
-                }
-            }
-        }
-    } catch (error) {
-        console.warn(`[HDHub4u] Failed to fetch latest domains: ${error.message}`);
+app.post('/auth/login', (req,res) => {
+  const { username, password } = req.body || {};
+  const ip = getClientIp(req);
+  const attemptState = canAttempt(ip);
+  if (!attemptState.allowed) {
+    res.setHeader('Retry-After', String(attemptState.retryAfter));
+    return res.status(429).json({ success:false, error:'TOO_MANY_ATTEMPTS', retryAfter: attemptState.retryAfter });
+  }
+  if (!username || !password) return res.status(400).json({ success:false, error:'MISSING_CREDENTIALS' });
+  if (!authenticate(username, password)) {
+    const entry = recordLoginFailure(ip);
+    if (entry.lockedUntil && Date.now() < entry.lockedUntil) {
+      const retryAfter = Math.ceil((entry.lockedUntil - Date.now())/1000);
+      res.setHeader('Retry-After', String(retryAfter));
+      return res.status(429).json({ success:false, error:'LOCKED', retryAfter });
     }
-}
+    return res.status(401).json({ success:false, error:'INVALID_CREDENTIALS', remaining: Math.max(0, MAX_ATTEMPTS_WINDOW - entry.count) });
+  }
+  recordLoginSuccess(ip);
+  const token = issueSession(username);
+  res.setHeader('Set-Cookie', `session=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${12*60*60}`);
+  res.json({ success:true, username });
+});
 
-async function getCurrentDomain() {
-    await fetchAndUpdateDomain();
-    return MAIN_URL;
-}
+app.post('/auth/logout', (req,res) => {
+  res.setHeader('Set-Cookie', 'session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0');
+  res.json({ success:true });
+});
 
-const BASE64_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=";
-function atob(value) {
-    if (!value) return "";
-    let input = String(value).replace(/=+$/, "");
-    let output = "";
-    let bc = 0, bs, buffer, idx = 0;
-    while ((buffer = input.charAt(idx++))) {
-        buffer = BASE64_CHARS.indexOf(buffer);
-        if (~buffer) {
-            bs = bc % 4 ? bs * 64 + buffer : buffer;
-            if (bc++ % 4) {
-                output += String.fromCharCode(255 & bs >> (-2 * bc & 6));
-            }
-        }
-    }
-    return output;
-}
+app.get('/auth/session', (req,res) => {
+  const sess = getSession(req);
+  if (!sess) return res.json({ authenticated:false });
+  res.json({ authenticated:true, username: sess.u });
+});
 
-function rot13(value) {
-    return value.replace(/[a-zA-Z]/g, function (c) {
-        return String.fromCharCode((c <= "Z" ? 90 : 122) >= (c = c.charCodeAt(0) + 13) ? c : c - 26);
-    });
-}
+app.post('/auth/change-password', requireAuth, (req,res) => {
+  const { oldPassword, newPassword } = req.body || {};
+  if (!oldPassword || !newPassword) return res.status(400).json({ success:false, error:'MISSING_FIELDS' });
+  const sess = req.session;
+  if (!authenticate(sess.u, oldPassword)) return res.status(401).json({ success:false, error:'INVALID_OLD_PASSWORD' });
+  if (newPassword.length < 8) return res.status(400).json({ success:false, error:'PASSWORD_TOO_SHORT' });
+  if (!updatePassword(sess.u, newPassword)) return res.status(500).json({ success:false, error:'UPDATE_FAILED' });
+  res.json({ success:true, message:'PASSWORD_UPDATED' });
+});
 
-async function getRedirectLinks(url) {
+app.get('/config.html', (req,res,next) => {
+  const sess = getSession(req);
+  if (!sess) return res.redirect(302, '/');
+  res.setHeader('Cache-Control','no-store, must-revalidate');
+  res.sendFile(path.join(process.cwd(),'public','config.html'));
+});
+
+app.get('/', (req,res) => {
+  res.setHeader('Cache-Control','no-store, must-revalidate');
+  res.sendFile(path.join(process.cwd(),'public','index.html'));
+});
+
+const metrics = {
+  startTime: Date.now(),
+  requestsTotal: 0,
+  streamRequests: 0,
+  providerCalls: {},
+  lastRequestAt: null,
+  lastError: null,
+  streamsReturned: 0,
+  tmdbToImdbLookups: 0
+};
+
+app.use((req,res,next)=>{ metrics.requestsTotal++; metrics.lastRequestAt = Date.now(); next(); });
+app.use(express.static(path.join(process.cwd(),'public')));
+
+app.get('/api/config', (req,res) => {
+  const fs = require('fs');
+  let override = {};
+  try { if (fs.existsSync(OVERRIDE_PATH)) override = JSON.parse(fs.readFileSync(OVERRIDE_PATH,'utf8')); } catch (e) {}
+  res.json({ success:true, merged: config, override, overridePath: OVERRIDE_PATH });
+});
+
+app.post('/api/config', (req,res) => {
+  const patch = req.body || {};
+  if (patch.port) {
+    const p = Number(patch.port); if (!Number.isFinite(p) || p<=0 || p>65535) return res.status(400).json({ success:false, error:'INVALID_PORT'});
+    patch.port = p;
+  }
+  if (patch.defaultProviders && !Array.isArray(patch.defaultProviders)) return res.status(400).json({ success:false, error:'DEFAULT_PROVIDERS_NOT_ARRAY'});
+  const ok = saveConfigPatch(patch);
+  res.json({ success: ok, merged: config });
+});
+
+app.post('/api/restart', (req,res) => {
+  const sess = getSession(req);
+  if(!sess) return res.status(401).json({ success:false, error:'UNAUTHORIZED' });
+  res.json({ success:true, message:'RESTARTING' });
+  setTimeout(()=>{
     try {
-        const response = await fetch(url, { headers: HEADERS });
-        if (!response.ok) return null;
-        const doc = await response.text();
-        const regex = /s\s*\(\s*['"]o['"]\s*,\s*['"]([A-Za-z0-9+/=]+)['"]|ck\s*\(\s*['"]_wp_http_\d+['"]\s*,\s*['"]([^'"]+)['"]/g;
-        let combinedString = "";
-        let match;
-        while ((match = regex.exec(doc)) !== null) {
-            const extractedValue = match[1] || match[2];
-            if (extractedValue) combinedString += extractedValue;
-        }
-        if (!combinedString) return null;
-        const decodedString = atob(rot13(atob(atob(combinedString))));
-        const jsonObject = JSON.parse(decodedString);
-        const encodedUrl = atob(jsonObject.o || "").trim();
-        if (encodedUrl) return encodedUrl;
-        return null;
-    } catch (e) {
-        return null;
-    }
-}
+      const fs = require('fs');
+      const restartMarker = require('path').join(process.cwd(), 'restart.trigger');
+      fs.writeFileSync(restartMarker, String(Date.now()));
+    } catch (e) {}
+    allowControlledExit = true;
+    realProcessExit(0);
+  }, 300);
+});
 
-async function hubCloudExtractor(url, referer) {
-    try {
-        let currentUrl = url.replace("hubcloud.ink", "hubcloud.dad");
-        const pageResponse = await fetch(currentUrl, { headers: { ...HEADERS, Referer: referer } });
-        let pageData = await pageResponse.text();
-        let finalUrl = currentUrl;
-        
-        if (!currentUrl.includes("hubcloud.php")) {
-            let nextHref = "";
-            const $first = cheerio.load(pageData);
-            const downloadBtn = $first("#download");
-            if (downloadBtn.length) {
-                nextHref = downloadBtn.attr("href");
-            }
-            if (nextHref) {
-                if (!nextHref.startsWith("http")) {
-                    const urlObj = new URL(currentUrl);
-                    nextHref = `${urlObj.protocol}//${urlObj.hostname}/${nextHref.replace(/^\//, "")}`;
-                }
-                finalUrl = nextHref;
-                const secondResponse = await fetch(finalUrl, { headers: { ...HEADERS, Referer: currentUrl } });
-                pageData = await secondResponse.text();
-            }
-        }
-        
-        const $ = cheerio.load(pageData);
-        const size = $("i#size").text().trim();
-        const header = $("div.card-header").text().trim();
-        const qualityStr = header.match(/(\d{3,4})[pP]/)?.[1];
-        const quality = qualityStr ? `${qualityStr}p` : '1080p';
+app.get('/api/health', (req, res) => {
+  res.json({ ok: true, service: 'tmdb-embed-api', time: new Date().toISOString() });
+});
 
-        const links = [];
-        const elements = $("a.btn").get();
-        for (const element of elements) {
-            const link = $(element).attr("href");
-            const text = $(element).text().toLowerCase();
-            if (link && (text.includes("download") || text.includes("server") || text.includes("fast"))) {
-                let directUrl = link;
-                if (link.includes("HubCloud") || link.includes("hubcloud")) {
-                    const resolved = await getRedirectLinks(link);
-                    if (resolved) directUrl = resolved;
-                }
-                links.push({
-                    name: 'HDHub4u',
-                    title: `HDHub4u · ${quality}${size ? ` · ${size}` : ''}`,
-                    url: directUrl,
-                    quality: quality,
-                    provider: 'HDHub4u',
-                    headers: HEADERS
-                });
-            }
-        }
-        return links;
-    } catch (e) {
+app.get('/api/metrics', (req,res) => {
+  res.json({
+    uptimeSeconds: Math.round((Date.now()-metrics.startTime)/1000),
+    requestsTotal: metrics.requestsTotal,
+    streamRequests: metrics.streamRequests,
+    providerCalls: metrics.providerCalls,
+    streamsReturned: metrics.streamsReturned,
+    tmdbToImdbLookups: metrics.tmdbToImdbLookups,
+    lastRequestAt: metrics.lastRequestAt,
+    memoryMB: Math.round(process.memoryUsage().rss/1024/1024),
+    loadAvg: os.loadavg ? os.loadavg() : [],
+    nodeVersion: process.version
+  });
+});
+
+app.get('/api/status', (req,res) => {
+  const endpoints = ['GET /api/health', 'GET /api/metrics', 'GET /api/status', 'GET /api/providers', 'GET /api/streams/:type/:tmdbId'];
+  const cookieRequiredProviders = new Set(['showbox']);
+  const providers = listProviders().map(p => {
+    const cookieRequired = cookieRequiredProviders.has(p.name);
+    const cookieOk = !cookieRequired || (config.febboxCookies && config.febboxCookies.length > 0);
+    return { name: p.name, enabled: p.enabled, cookieRequired, cookieOk };
+  });
+  res.json({ success:true, providerCheckTmdbId: config.providerCheckTmdbId, metrics, endpoints, providers });
+});
+
+app.get('/api/providers', (req,res) => {
+  res.json({ success: true, providers: listProviders() });
+});
+
+app.get('/api/providers/:name', (req,res) => {
+  const p = getProvider(req.params.name);
+  if (!p) return res.status(404).json({ success:false, error:'PROVIDER_NOT_FOUND' });
+  res.json({ success:true, provider:{ name: p.name, enabled: p.enabled } });
+});
+
+app.get('/api/streams/:type/:tmdbId', async (req,res) => {
+  const { type, tmdbId } = req.params;
+  if (!['movie','series'].includes(type)) return res.status(400).json({ success:false, error:'INVALID_TYPE' });
+  const season = req.query.season ? Number(req.query.season) : null;
+  const episode = req.query.episode ? Number(req.query.episode) : null;
+  try {
+    metrics.streamRequests++;
+    const tmdbType = type === 'movie' ? 'movie' : 'tv';
+    const imdbId = await resolveImdbId(tmdbType, tmdbId); if (imdbId) metrics.tmdbToImdbLookups++;
+    
+    const allProviders = listProviders();
+    const selectedProviders = Array.from(new Set(allProviders.map(p => p.name)));
+
+    const providerTimings = {};
+    const results = await Promise.all(selectedProviders.map(async name => {
+      const prov = getProvider(name);
+      if (!prov || !prov.enabled) return [];
+      metrics.providerCalls[name] = (metrics.providerCalls[name]||0)+1;
+      try {
+        const t0 = Date.now();
+        const r = await prov.fetch({ tmdbId, type, season, episode, imdbId, filters:{ } });
+        providerTimings[name] = Date.now()-t0;
+        return r;
+      } catch (e) {
+        providerTimings[name] = null;
         return [];
+      }
+    }));
+    let streams = results.flat();
+    streams = applyFilters(streams, 'aggregate', config.minQualities, config.excludeCodecs);
+    metrics.streamsReturned += streams.length;
+    if (config.enableProxy) {
+      const serverUrl = `${req.protocol}://${req.get('host')}`;
+      streams = processStreamsForProxy(streams, serverUrl);
+      streams = streams.map(s => { if (s && typeof s === 'object') { const { headers, ...rest } = s; return rest; } return s; });
     }
-}
+    res.json({ success:true, tmdbId, imdbId, count: streams.length, providerTimings, streams });
+  } catch (e) {
+    metrics.lastError = e.message;
+    res.status(500).json({ success:false, error:'INTERNAL_ERROR', message:e.message });
+  }
+});
 
-async function searchAndExtract(title, year) {
-    try {
-        const domain = await getCurrentDomain();
-        const searchUrl = `${domain}/?s=${encodeURIComponent(title)}`;
-        const res = await fetch(searchUrl, { headers: HEADERS });
-        if (!res.ok) return [];
-        const html = await res.text();
-        const $ = cheerio.load(html);
-        
-        const posts = [];
-        $("div.recent-movies, article.post, div.item").each((i, el) => {
-            const aTag = $(el).find("a").first();
-            const postUrl = aTag.attr("href");
-            const postTitle = $(el).find("h2, h3, .title").text().trim() || aTag.text().trim();
-            if (postUrl) posts.push({ url: postUrl, title: postTitle });
-        });
-
-        const streams = [];
-        for (const post of posts.slice(0, 2)) {
-            const postRes = await fetch(post.url, { headers: HEADERS });
-            if (!postRes.ok) continue;
-            const postHtml = await postRes.text();
-            const $$ = cheerio.load(postHtml);
-            
-            const hubCloudLinks = [];
-            $$("a").each((i, el) => {
-                const href = $$(el).attr("href");
-                if (href && (href.includes("hubcloud") || href.includes("HubCloud") || href.includes("24embed"))) {
-                    hubCloudLinks.push(href);
-                }
-            });
-
-            for (const link of hubCloudLinks.slice(0, 3)) {
-                const extracted = await hubCloudExtractor(link, post.url);
-                streams.push(...extracted);
-            }
-        }
-        return streams;
-    } catch (e) {
-        console.warn(`[HDHub4u] Search error: ${e.message}`);
-        return [];
-    }
-}
-
-async function getHdhub4uStreams(tmdbId, mediaType = 'movie', seasonNum = null, episodeNum = null) {
-    console.log(`[HDHub4u] Fetching streams for TMDB ID: ${tmdbId}, Type: ${mediaType}`);
-    try {
-        const type = mediaType === 'tv' ? 'series' : 'movie';
-        const tmdbType = type === 'series' ? 'tv' : 'movie';
-        const details = await getDetails(tmdbType, tmdbId);
-        const title = (details && (details.title || details.name)) || '';
-        const releaseDate = tmdbType === 'tv' ? details.first_air_date : details.release_date;
-        const year = releaseDate ? parseInt(releaseDate.split("-")[0]) : null;
-
-        if (!title) {
-            console.log(`[HDHub4u] No title resolved for TMDB ID ${tmdbId}`);
-            return [];
-        }
-
-        let searchTitle = title;
-        if (type === 'series' && seasonNum) {
-            searchTitle = `${title} S${seasonNum.toString().padStart(2, '0')}`;
-        }
-
-        const streams = await searchAndExtract(searchTitle, year);
-        console.log(`[HDHub4u] Got ${streams.length} stream(s) for "${title}"`);
-        return streams;
-    } catch (err) {
-        console.error(`[HDHub4u] Error: ${err.message}`);
-        return [];
-    }
-}
-
-module.exports = { getHdhub4uStreams };
+const PORT = config.port;
+const HOST = process.env.BIND_HOST || '0.0.0.0';
+app.listen(PORT, HOST, () => {
+  console.log(`TMDB Embed REST API listening on http://${HOST}:${PORT}`);
+});
