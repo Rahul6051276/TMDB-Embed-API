@@ -1,4 +1,4 @@
-Require('dotenv').config();
+require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const os = require('os');
@@ -7,7 +7,7 @@ const { authenticate, issueSession, requireAuth, getSession, updatePassword } = 
 const path = require('path');
 const { listProviders, getProvider, getCookieStats } = require('./providers/registry');
 const { createProxyRoutes, processStreamsForProxy } = require('./proxy/proxyServer');
-const { resolveImdbId } = require('./utils/tmdb'); // <-- Fixed path here
+const { resolveImdbId } = require('./utils/tmdb');
 const { applyFilters } = require('./utils/streamFilters');
 
 const app = express();
