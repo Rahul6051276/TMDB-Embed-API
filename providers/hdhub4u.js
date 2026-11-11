@@ -9,7 +9,7 @@ const DOMAINS_URL = "https://raw.githubusercontent.com/phisher98/TVVVV/refs/head
 const DOMAIN_CACHE_TTL = 4 * 60 * 60 * 1000;
 let domainCacheTimestamp = 0;
 
-// आपकी TMDB API Key यहाँ सेट कर दी गई है
+// आपकी TMDB API Key
 const TMDB_API_KEY = "83ec7009a9fdb16a980f5bac7db19d2f";
 
 const HEADERS = {
@@ -23,7 +23,7 @@ function updateMainUrl(url) {
     HEADERS.Referer = `${MAIN_URL}/`;
 }
 
-// --- Network Request Helper (4KHDHub स्टाइल) ---
+// --- Network Request Helper ---
 function makeRequest(url, options = {}) {
     return new Promise((resolve, reject) => {
         const maxRedirects = options.maxRedirects || 10;
@@ -106,11 +106,10 @@ function rot13(str) {
     });
 }
 
-// --- TMDB Details Resolver (आपकी API Key के साथ) ---
+// --- TMDB Details Resolver ---
 async function resolveMediaDetails(id, mediaType) {
     const tmdbType = (mediaType === 'tv' || mediaType === 'series') ? 'tv' : 'movie';
 
-    // 1. अगर आपके प्रोजेक्ट में ../utils/tmdb मौजूद है तो पहले उसे आज़माएं
     try {
         const tmdbModule = require('../utils/tmdb');
         if (tmdbModule && typeof tmdbModule.getDetails === 'function') {
@@ -119,11 +118,8 @@ async function resolveMediaDetails(id, mediaType) {
                 return details;
             }
         }
-    } catch (e) {
-        // अगर ../utils/tmdb नहीं है तो नीचे आपकी API Key से डेटा निकलेगा
-    }
+    } catch (e) {}
 
-    // 2. अगर IMDb ID (जैसे tt1234567) दी गई है, तो आपकी TMDB Key के /find एंडपॉइंट से खोजें
     if (String(id).startsWith('tt')) {
         try {
             const findUrl = `https://api.themoviedb.org/3/find/${id}?api_key=${TMDB_API_KEY}&external_source=imdb_id`;
@@ -140,7 +136,6 @@ async function resolveMediaDetails(id, mediaType) {
         }
     }
 
-    // 3. अगर सीधे TMDB ID दी गई है
     try {
         const apiUrl = `https://api.themoviedb.org/3/${tmdbType}/${id}?api_key=${TMDB_API_KEY}`;
         const res = await makeRequest(apiUrl);
@@ -249,7 +244,6 @@ async function hubCloudExtractor(url, referer) {
             const link = $(element).attr("href");
             const text = $(element).text().toLowerCase();
 
-            // r2.dev ब्लॉक पॉलिसी
             if (link && /r2\.dev/i.test(link)) continue;
 
             if (link && (text.includes("download") || text.includes("server") || text.includes("fast") || text.includes("fsl") || text.includes("pixel"))) {
@@ -260,7 +254,6 @@ async function hubCloudExtractor(url, referer) {
                     if (resolved) directUrl = resolved;
                 }
 
-                // Pixeldrain डायरेक्ट डाउनलोड लिंक फिक्स
                 if (directUrl.includes("pixeldrain.com/u/") || directUrl.includes("pixeldrain.dev/u/")) {
                     directUrl = directUrl.replace("/u/", "/api/file/") + "?download";
                 }
@@ -330,7 +323,6 @@ async function searchAndExtract(title, year) {
                 }
             });
 
-            // एन्क्रिप्टेड रीडायरेक्ट लिंक्स को डिकोड करके HubCloud लिंक निकालें
             if (hubCloudLinks.length === 0 && encryptedRedirectLinks.length > 0) {
                 for (const rLink of encryptedRedirectLinks.slice(0, 4)) {
                     const resolvedUrl = await getRedirectLinks(rLink);
@@ -364,21 +356,37 @@ async function searchAndExtract(title, year) {
     }
 }
 
-// --- Main Entry Function ---
-async function getHdhub4uStreams(tmdbId, mediaType = 'movie', seasonNum = null, episodeNum = null) {
-    console.log(`[HDHub4u] Fetching streams for TMDB ID: ${tmdbId}, Type: ${mediaType}`);
+// --- Main Entry Function (Supports both direct args and object payload) ---
+async function getHdhub4uStreams(arg1, mediaType = 'movie', seasonNum = null, episodeNum = null) {
+    let tmdbId = arg1;
+    let passedTitle = '';
+    let passedYear = null;
+
+    // अगर registry एक Object पास कर रही है (जैसे { tmdbId, type, title, year, season, episode })
+    if (arg1 && typeof arg1 === 'object') {
+        tmdbId = arg1.tmdbId || arg1.id || arg1.imdbId || '';
+        mediaType = arg1.type || arg1.mediaType || 'movie';
+        seasonNum = arg1.season || arg1.seasonNum || null;
+        episodeNum = arg1.episode || arg1.episodeNum || null;
+        passedTitle = arg1.title || arg1.name || '';
+        passedYear = arg1.year || null;
+    }
+
+    console.log(`[HDHub4u] Fetching streams for TMDB ID: ${tmdbId || passedTitle}, Type: ${mediaType}`);
     try {
         const type = (mediaType === 'tv' || mediaType === 'series') ? 'series' : 'movie';
-        let title = '';
-        let year = null;
+        let title = passedTitle;
+        let year = passedYear;
 
-        if (/^\d+$/.test(String(tmdbId)) || String(tmdbId).startsWith('tt')) {
-            const details = await resolveMediaDetails(tmdbId, type);
-            title = (details && (details.title || details.name)) || '';
-            const releaseDate = type === 'series' ? details?.first_air_date : details?.release_date;
-            year = releaseDate ? parseInt(String(releaseDate).split("-")[0]) : null;
-        } else {
-            title = String(tmdbId);
+        if (!title && tmdbId) {
+            if (/^\d+$/.test(String(tmdbId)) || String(tmdbId).startsWith('tt')) {
+                const details = await resolveMediaDetails(tmdbId, type);
+                title = (details && (details.title || details.name)) || '';
+                const releaseDate = type === 'series' ? details?.first_air_date : details?.release_date;
+                year = releaseDate ? parseInt(String(releaseDate).split("-")[0]) : null;
+            } else {
+                title = String(tmdbId);
+            }
         }
 
         if (!title) {
@@ -400,7 +408,9 @@ async function getHdhub4uStreams(tmdbId, mediaType = 'movie', seasonNum = null, 
     }
 }
 
+// आपके registry को 'fetch' चाहिए, इसलिए यहाँ सभी नामों से एक्सपोर्ट कर दिया गया है
 module.exports = { 
+    fetch: getHdhub4uStreams,
     getHdhub4uStreams,
     getStreams: getHdhub4uStreams
 };
