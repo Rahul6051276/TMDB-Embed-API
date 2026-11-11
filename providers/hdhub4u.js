@@ -14,6 +14,8 @@ const TMDB_API_KEY = "83ec7009a9fdb16a980f5bac7db19d2f";
 
 const HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.5",
     "Cookie": "xla=s4t",
     "Referer": `${MAIN_URL}/`
 };
@@ -160,7 +162,7 @@ async function getCurrentDomain() {
             if (data && data.HDHUB4u) {
                 updateMainUrl(data.HDHUB4u);
                 domainCacheTimestamp = now;
-                console.log(`[HDHub4u] Active domain: ${MAIN_URL}`);
+                console.log(`[HDHub4u] Active domain updated to: ${MAIN_URL}`);
             }
         }
     } catch (error) {
@@ -208,21 +210,25 @@ async function getRedirectLinks(url) {
 // --- HubCloud Extractor ---
 async function hubCloudExtractor(url, referer) {
     try {
-        let currentUrl = url.replace("hubcloud.ink", "hubcloud.dad").replace("hubcloud.art", "hubcloud.dad");
+        let currentUrl = url
+            .replace("hubcloud.ink", "hubcloud.dad")
+            .replace("hubcloud.art", "hubcloud.dad")
+            .replace("hubcloud.lol", "hubcloud.dad");
+
         const pageResponse = await makeRequest(currentUrl, { headers: { ...HEADERS, Referer: referer } });
         let pageData = pageResponse.body;
-        let finalUrl = currentUrl;
+        let finalUrl = pageResponse.url || currentUrl;
 
-        if (!currentUrl.includes("hubcloud.php")) {
+        if (!finalUrl.includes("hubcloud.php")) {
             let nextHref = "";
             const $first = cheerio.load(pageData);
-            const downloadBtn = $first("#download");
+            const downloadBtn = $first("#download, a.btn-primary, a[href*='hubcloud.php'], a[href*='gamerxyt']");
             if (downloadBtn.length) {
-                nextHref = downloadBtn.attr("href");
+                nextHref = downloadBtn.first().attr("href");
             }
             if (nextHref) {
                 if (!nextHref.startsWith("http")) {
-                    const urlObj = new URL(currentUrl);
+                    const urlObj = new URL(finalUrl);
                     nextHref = `${urlObj.protocol}//${urlObj.hostname}/${nextHref.replace(/^\//, "")}`;
                 }
                 finalUrl = nextHref;
@@ -234,19 +240,28 @@ async function hubCloudExtractor(url, referer) {
         const $ = cheerio.load(pageData);
         const size = $("i#size").text().trim();
         const header = $("div.card-header").text().trim();
-        const qualityStr = header.match(/(\d{3,4})[pP]/)?.[1];
-        const quality = qualityStr ? `${qualityStr}p` : '1080p';
+        const qualityNum = parseInt(header.match(/(\d{3,4})[pP]/)?.[1] || "1080", 10);
 
         const links = [];
-        const elements = $("a.btn").get();
+        const elements = $("a.btn, a[href*='pixeldrain'], a[href*='r2.cloudflarestorage'], a[href*='googleusercontent'], a[href*='hbplay']").get();
 
         for (const element of elements) {
             const link = $(element).attr("href");
-            const text = $(element).text().toLowerCase();
+            const text = $(element).text().trim();
+            const lowerText = text.toLowerCase();
 
-            if (link && /r2\.dev/i.test(link)) continue;
+            if (!link || /r2\.dev/i.test(link) || link.startsWith("javascript") || link === "#") continue;
 
-            if (link && (text.includes("download") || text.includes("server") || text.includes("fast") || text.includes("fsl") || text.includes("pixel"))) {
+            if (
+                lowerText.includes("download") ||
+                lowerText.includes("server") ||
+                lowerText.includes("fast") ||
+                lowerText.includes("fsl") ||
+                lowerText.includes("pixel") ||
+                lowerText.includes("10gbps") ||
+                link.includes("pixeldrain") ||
+                link.includes("hbplay")
+            ) {
                 let directUrl = link;
 
                 if (link.toLowerCase().includes("hubcloud") || link.includes("?id=")) {
@@ -254,24 +269,36 @@ async function hubCloudExtractor(url, referer) {
                     if (resolved) directUrl = resolved;
                 }
 
+                // अगर /tg/go?id= या सस्पिशियस टेलीग्राम लिंक है तो छोड़ दें (जैसा 4KHDHub में है)
+                if (directUrl.includes("/tg/go") || directUrl.includes("t.me/")) continue;
+
                 if (directUrl.includes("pixeldrain.com/u/") || directUrl.includes("pixeldrain.dev/u/")) {
-                    directUrl = directUrl.replace("/u/", "/api/file/") + "?download";
+                    const fileId = directUrl.split("/u/")[1]?.split("?")[0];
+                    if (fileId) directUrl = `https://pixeldrain.dev/api/file/${fileId}`;
                 }
 
+                let serverName = "Server";
+                if (directUrl.includes("pixeldrain")) serverName = "Pixeldrain";
+                else if (lowerText.includes("fsl") || directUrl.includes("cloudflarestorage")) serverName = "FSL Server";
+                else if (lowerText.includes("10gbps") || directUrl.includes("googleusercontent")) serverName = "10Gbps Server";
+                else if (directUrl.includes("hbplay")) serverName = "HubPlay";
+
                 if (directUrl && !/r2\.dev/i.test(directUrl)) {
+                    // 4KHDHub के सटीक फॉर्मेट में आउटपुट
                     links.push({
-                        name: 'HDHub4u',
-                        title: `HDHub4u · ${quality}${size ? ` · ${size}` : ''}`,
+                        name: `HDHub4u - ${serverName} - ${qualityNum}p`,
+                        title: `${header || 'HDHub4u Stream'}${size ? `\n${size}` : ''}`,
                         url: directUrl,
-                        quality: quality,
-                        provider: 'HDHub4u',
-                        headers: HEADERS
+                        quality: qualityNum,
+                        provider: 'hdhub4u',
+                        headers: {}
                     });
                 }
             }
         }
         return links;
     } catch (e) {
+        console.error(`[HDHub4u] hubCloudExtractor error: ${e.message}`);
         return [];
     }
 }
@@ -281,7 +308,7 @@ async function searchAndExtract(title, year) {
     try {
         const domain = await getCurrentDomain();
         const searchUrl = `${domain}/?s=${encodeURIComponent(title)}`;
-        console.log(`[HDHub4u] Fetching search URL: ${searchUrl}`);
+        console.log(`[HDHub4u] Searching URL: ${searchUrl}`);
 
         const res = await makeRequest(searchUrl, { parseHTML: true });
         if (res.statusCode >= 400 || !res.$) {
@@ -291,12 +318,15 @@ async function searchAndExtract(title, year) {
 
         const $ = res.$;
         const posts = [];
+        const seenUrls = new Set();
 
-        $("ul.recent-movies li, div.recent-movies, article.post, div.item, .thumb").each((i, el) => {
+        // सभी संभावित पोस्ट कंटेनर्स से मूवी लिंक्स निकालें
+        $("ul.recent-movies li, div.recent-movies, article.post, div.item, .thumb, figure").each((i, el) => {
             const aTag = $(el).find("a").first();
             const postUrl = aTag.attr("href");
             const postTitle = $(el).find("p, h2, h3, .title, figcaption").text().trim() || aTag.attr("title") || aTag.text().trim();
-            if (postUrl && postUrl.startsWith("http")) {
+            if (postUrl && postUrl.startsWith("http") && !seenUrls.has(postUrl)) {
+                seenUrls.add(postUrl);
                 posts.push({ url: postUrl, title: postTitle });
             }
         });
@@ -305,6 +335,7 @@ async function searchAndExtract(title, year) {
 
         const streams = [];
         for (const post of posts.slice(0, 2)) {
+            console.log(`[HDHub4u] Inspecting post: ${post.title} -> ${post.url}`);
             const postRes = await makeRequest(post.url, { parseHTML: true });
             if (!postRes.$) continue;
 
@@ -315,16 +346,40 @@ async function searchAndExtract(title, year) {
             $$("a").each((i, el) => {
                 const href = $$(el).attr("href");
                 if (!href) return;
+                const lowerHref = href.toLowerCase();
 
-                if (href.toLowerCase().includes("hubcloud") || href.includes("24embed")) {
+                if (lowerHref.includes("hubcloud") || lowerHref.includes("24embed")) {
                     hubCloudLinks.push(href);
-                } else if (href.includes("?id=") || href.includes("techyboy") || href.includes("crypto") || href.includes("gadgetsweb")) {
+                } else if (
+                    href.includes("?id=") ||
+                    lowerHref.includes("techyboy") ||
+                    lowerHref.includes("crypto") ||
+                    lowerHref.includes("gadgetsweb") ||
+                    lowerHref.includes("taazabull") ||
+                    lowerHref.includes("hubdrive")
+                ) {
                     encryptedRedirectLinks.push(href);
                 }
             });
 
+            console.log(`[HDHub4u] Direct HubCloud links: ${hubCloudLinks.length}, Redirect links: ${encryptedRedirectLinks.length}`);
+
+            // रीडायरेक्ट लिंक्स को डिकोड करें
             if (hubCloudLinks.length === 0 && encryptedRedirectLinks.length > 0) {
-                for (const rLink of encryptedRedirectLinks.slice(0, 4)) {
+                for (const rLink of encryptedRedirectLinks.slice(0, 5)) {
+                    if (rLink.toLowerCase().includes("hubdrive")) {
+                        const drivePage = await makeRequest(rLink, { parseHTML: true });
+                        if (drivePage.$) {
+                            drivePage.$("a").each((i, el) => {
+                                const dHref = drivePage.$(el).attr("href");
+                                if (dHref && dHref.toLowerCase().includes("hubcloud")) {
+                                    hubCloudLinks.push(dHref);
+                                }
+                            });
+                        }
+                        continue;
+                    }
+
                     const resolvedUrl = await getRedirectLinks(rLink);
                     if (resolvedUrl) {
                         if (resolvedUrl.toLowerCase().includes("hubcloud")) {
@@ -344,7 +399,7 @@ async function searchAndExtract(title, year) {
                 }
             }
 
-            for (const link of hubCloudLinks.slice(0, 4)) {
+            for (const link of [...new Set(hubCloudLinks)].slice(0, 4)) {
                 const extracted = await hubCloudExtractor(link, post.url);
                 streams.push(...extracted);
             }
@@ -356,13 +411,12 @@ async function searchAndExtract(title, year) {
     }
 }
 
-// --- Main Entry Function (Supports both direct args and object payload) ---
+// --- Main Entry Function ---
 async function getHdhub4uStreams(arg1, mediaType = 'movie', seasonNum = null, episodeNum = null) {
     let tmdbId = arg1;
     let passedTitle = '';
     let passedYear = null;
 
-    // अगर registry एक Object पास कर रही है (जैसे { tmdbId, type, title, year, season, episode })
     if (arg1 && typeof arg1 === 'object') {
         tmdbId = arg1.tmdbId || arg1.id || arg1.imdbId || '';
         mediaType = arg1.type || arg1.mediaType || 'movie';
@@ -372,7 +426,7 @@ async function getHdhub4uStreams(arg1, mediaType = 'movie', seasonNum = null, ep
         passedYear = arg1.year || null;
     }
 
-    console.log(`[HDHub4u] Fetching streams for TMDB ID: ${tmdbId || passedTitle}, Type: ${mediaType}`);
+    console.log(`[HDHub4u] Starting search for TMDB ID: ${tmdbId || passedTitle}, Type: ${mediaType}`);
     try {
         const type = (mediaType === 'tv' || mediaType === 'series') ? 'series' : 'movie';
         let title = passedTitle;
@@ -408,7 +462,6 @@ async function getHdhub4uStreams(arg1, mediaType = 'movie', seasonNum = null, ep
     }
 }
 
-// आपके registry को 'fetch' चाहिए, इसलिए यहाँ सभी नामों से एक्सपोर्ट कर दिया गया है
 module.exports = { 
     fetch: getHdhub4uStreams,
     getHdhub4uStreams,
